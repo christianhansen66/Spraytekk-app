@@ -429,7 +429,7 @@
 const CLIENT_ID = 'e482c648-5353-4307-9a6a-b837e3fa3cd9';
 const TENANT_ID = 'ce7878c1-2a83-4397-b5e9-a0076c28703e';
 const AUTHORITY = 'https://login.microsoftonline.com/' + TENANT_ID;
-const SCOPES = ['Calendars.ReadWrite', 'User.Read', 'Mail.ReadBasic'];
+const SCOPES = ['Calendars.ReadWrite', 'Calendars.ReadWrite.Shared', 'User.Read', 'Mail.ReadBasic'];
 const TECH_COLORS = { Christian:'#1B5EAB', Jesper:'#2A7A3B', Frederik:'#C05A00', Admin:'#1A1816' };
 
 let msalApp = null;
@@ -736,61 +736,60 @@ async function fetchAttachments(jobId) {
   const card = document.getElementById('attach-card-' + jobId);
   if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Henter filer fra Outlook...</div>';
   try {
-    // Try multiple endpoint patterns — shared mailbox can need /calendar/events/ path
-    const endpoints = [
-      'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments',
-      'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/calendar/events/' + j.outlookId + '/attachments'
-    ];
-    let data = null;
-    let lastErr = '';
-    for(const url of endpoints) {
-      try {
-        const resp = await fetch(url, {
-          headers: { Authorization: 'Bearer ' + token, 'Prefer': 'outlook.body-content-type="html"' }
-        });
-        if(resp.ok) {
-          data = await resp.json();
-          break;
-        } else {
-          lastErr = await resp.text().catch(() => 'HTTP ' + resp.status);
-          console.warn('Attachments endpoint failed:', url, resp.status, lastErr);
-        }
-      } catch(e) {
-        lastErr = e.message;
-        console.warn('Attachments endpoint error:', url, e);
-      }
-    }
-    if(!data) throw new Error(lastErr || 'Alle endpoints fejlede');
-    const attachList = data.value || [];
+    // Use $expand=attachments on the event itself — most reliable for shared mailbox
+    const expandUrl = 'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '?$expand=attachments';
+    console.log('Fetching attachments via $expand for event:', j.outlookId);
+    const resp = await fetch(expandUrl, {
+      headers: { Authorization: 'Bearer ' + token }
+    });
 
-    // Fetch each attachment individually to get contentBytes (for images/downloads)
-    const attachments = [];
-    for(const att of attachList) {
-      if(att.contentBytes) {
-        // Already have content (small attachments)
-        attachments.push({ id: att.id, name: att.name, size: att.size, contentType: att.contentType || 'application/octet-stream', contentBytes: att.contentBytes });
-        continue;
-      }
-      try {
-        const aResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments/' + att.id, {
-          headers: { Authorization: 'Bearer ' + token }
-        });
-        if(aResp.ok) {
-          const aData = await aResp.json();
-          attachments.push({
-            id: aData.id, name: aData.name || att.name, size: aData.size || att.size,
-            contentType: aData.contentType || att.contentType || 'application/octet-stream',
-            contentBytes: aData.contentBytes || null
-          });
-        } else {
-          attachments.push({ id: att.id, name: att.name, size: att.size, contentType: att.contentType || 'application/octet-stream', contentBytes: null });
+    if(!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      console.warn('$expand attachments failed:', resp.status, errBody);
+      // Fallback: try direct attachments endpoint
+      const directUrl = 'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments';
+      console.log('Trying direct endpoint:', directUrl);
+      const resp2 = await fetch(directUrl, { headers: { Authorization: 'Bearer ' + token } });
+      if(!resp2.ok) {
+        const errBody2 = await resp2.text().catch(() => '');
+        console.warn('Direct attachments also failed:', resp2.status, errBody2);
+        // Last resort: try beta API
+        const betaUrl = 'https://graph.microsoft.com/beta/users/info@spraytek.dk/events/' + j.outlookId + '/attachments';
+        const resp3 = await fetch(betaUrl, { headers: { Authorization: 'Bearer ' + token } });
+        if(!resp3.ok) {
+          const errBody3 = await resp3.text().catch(() => '');
+          console.warn('Beta attachments also failed:', resp3.status, errBody3);
+          throw new Error('Event ID: ' + j.outlookId.substring(0,20) + '... Status: ' + resp.status + ' / ' + resp2.status + ' / ' + resp3.status);
         }
-      } catch(ae) {
-        attachments.push({ id: att.id, name: att.name, size: att.size, contentType: att.contentType || 'application/octet-stream', contentBytes: null });
+        const betaData = await resp3.json();
+        j.attachments = (betaData.value || []).map(a => ({
+          id: a.id, name: a.name, size: a.size,
+          contentType: a.contentType || 'application/octet-stream',
+          contentBytes: a.contentBytes || null
+        }));
+        j.attachmentsLoaded = true;
+        renderAttachCard(jobId);
+        return;
       }
+      const directData = await resp2.json();
+      j.attachments = (directData.value || []).map(a => ({
+        id: a.id, name: a.name, size: a.size,
+        contentType: a.contentType || 'application/octet-stream',
+        contentBytes: a.contentBytes || null
+      }));
+      j.attachmentsLoaded = true;
+      renderAttachCard(jobId);
+      return;
     }
 
-    j.attachments = attachments;
+    const eventData = await resp.json();
+    const attachList = eventData.attachments || [];
+
+    j.attachments = attachList.map(a => ({
+      id: a.id, name: a.name, size: a.size,
+      contentType: a.contentType || 'application/octet-stream',
+      contentBytes: a.contentBytes || null
+    }));
     j.attachmentsLoaded = true;
     renderAttachCard(jobId);
   } catch(e) {
