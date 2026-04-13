@@ -646,7 +646,7 @@ async function syncOutlook() {
         rawDate: startDt,
         tech: existing ? existing.tech : guessAssigneeFromBody(ev.body?.content||'') || guessAssignee(ev.attendees),
         desc: stripHtml(ev.body?.content || ''),
-        materials: existing ? existing.materials : loadMaterialsFromStorage(ev.id),
+        materials: existing ? existing.materials : (loadMaterialsFromStorage(ev.id).length > 0 ? loadMaterialsFromStorage(ev.id) : parseMaterialsFromBody(ev.body?.content||'')),
         status: existing ? existing.status : categoryToStatus(ev.categories),
         photos: existing ? existing.photos : [],
         hasAttachments: ev.hasAttachments,
@@ -698,8 +698,42 @@ function categoryToStatus(categories) {
 }
 
 function guessAssigneeFromBody(body) {
+  // First try Spraytek table format
+  const tableMatch = body.match(/Tildelt til<\/td>\s*<td[^>]*>(.*?)<\/td>/i);
+  if(tableMatch) {
+    const name = tableMatch[1].replace(/<[^>]*>/g,'').trim();
+    if(name && name !== 'Ikke tildelt') return name;
+  }
+  // Fallback: old [Tildelt: Name] format
   const match = body.match(/\[Tildelt:\s*(Christian|Jesper|Frederik)\]/i);
   return match ? match[1] : null;
+}
+
+// Parse materials from Spraytek table in Outlook event body
+function parseMaterialsFromBody(body) {
+  if(!body) return [];
+  // Find the "Udført arbejde" table
+  const marker = body.indexOf('Udført arbejde');
+  if(marker === -1) return [];
+  const tableStart = body.indexOf('<table', marker);
+  if(tableStart === -1) return [];
+  const tableEnd = body.indexOf('</table>', tableStart);
+  if(tableEnd === -1) return [];
+  const tableHtml = body.substring(tableStart, tableEnd + 8);
+  // Parse rows (skip header row)
+  const rows = tableHtml.match(/<tr[^>]*>(?!.*<th)(.*?)<\/tr>/gi);
+  if(!rows) return [];
+  const materials = [];
+  rows.forEach(function(row) {
+    const cells = row.match(/<td[^>]*>(.*?)<\/td>/gi);
+    if(cells && cells.length >= 3) {
+      const nr = cells[0].replace(/<[^>]*>/g,'').trim();
+      const name = cells[1].replace(/<[^>]*>/g,'').trim();
+      const qty = parseInt(cells[2].replace(/<[^>]*>/g,'').trim()) || 0;
+      if(nr && qty > 0) materials.push({ nr: nr, name: name, qty: qty });
+    }
+  });
+  return materials;
 }
 
 function guessAssignee(attendees) {
@@ -1772,21 +1806,15 @@ function renderMaterialsCard(jobId) {
 
   card.innerHTML =
     '<div class="detail-section-title">Udført arbejde<span id="mat-badge-' + jobId + '" class="mat-badge" style="display:none"></span></div>' +
+    '<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Synkroniseres automatisk til Outlook</div>' +
     '<input type="text" class="mat-search" id="mat-search-' + jobId + '" placeholder="Tryk for at vælge arbejdstype..." ' +
     'oninput="filterProducts(\'' + jobId + '\', this.value)" ' +
     'onfocus="filterProducts(\'' + jobId + '\', this.value)">' +
     '<div id="mat-dropdown-' + jobId + '" style="display:none;max-height:320px;overflow-y:auto;border:1.5px solid var(--border2);border-radius:var(--radius-sm);margin-bottom:12px;background:var(--surface)"></div>' +
     '<div id="mat-list-' + jobId + '"></div>' +
-    '<div class="mat-total" id="mat-total-' + jobId + '" style="display:none"></div>' +
-    '<button id="mat-upload-' + jobId + '" onclick="uploadVareskema(\'' + jobId + '\')" style="display:none;width:100%;margin-top:12px;padding:14px;border:none;border-radius:var(--radius-sm);background:var(--blue);color:white;font-size:15px;font-weight:500;cursor:pointer;font-family:\'DM Sans\',sans-serif;min-height:48px">Gem vareskema til Outlook</button>';
+    '<div class="mat-total" id="mat-total-' + jobId + '" style="display:none"></div>';
 
   renderMaterialsList(jobId);
-  // Show/hide upload button
-  const uploadBtn = document.getElementById('mat-upload-' + jobId);
-  if(uploadBtn) {
-    const mats = getJobMaterials(jobId);
-    uploadBtn.style.display = mats.length > 0 ? 'block' : 'none';
-  }
 }
 
 function renderMaterialsList(jobId) {
@@ -1818,11 +1846,6 @@ function renderMaterialsList(jobId) {
   if(badge) {
     badge.style.display = 'inline-flex';
     badge.textContent = materials.length + ' vare' + (materials.length > 1 ? 'r' : '');
-  }
-  // Update upload button visibility
-  const uploadBtn = document.getElementById('mat-upload-' + jobId);
-  if(uploadBtn) {
-    uploadBtn.style.display = materials.length > 0 ? 'block' : 'none';
   }
 }
 
