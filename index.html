@@ -736,36 +736,53 @@ async function fetchAttachments(jobId) {
   const card = document.getElementById('attach-card-' + jobId);
   if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Henter filer fra Outlook...</div>';
   try {
-    // First get attachment list (without contentBytes for reliability)
-    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments', {
-      headers: { Authorization: 'Bearer ' + token }
-    });
-    if(!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      console.warn('Attachments response:', resp.status, errText);
-      throw new Error('HTTP ' + resp.status);
+    // Try multiple endpoint patterns — shared mailbox can need /calendar/events/ path
+    const endpoints = [
+      'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments',
+      'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/calendar/events/' + j.outlookId + '/attachments'
+    ];
+    let data = null;
+    let lastErr = '';
+    for(const url of endpoints) {
+      try {
+        const resp = await fetch(url, {
+          headers: { Authorization: 'Bearer ' + token, 'Prefer': 'outlook.body-content-type="html"' }
+        });
+        if(resp.ok) {
+          data = await resp.json();
+          break;
+        } else {
+          lastErr = await resp.text().catch(() => 'HTTP ' + resp.status);
+          console.warn('Attachments endpoint failed:', url, resp.status, lastErr);
+        }
+      } catch(e) {
+        lastErr = e.message;
+        console.warn('Attachments endpoint error:', url, e);
+      }
     }
-    const data = await resp.json();
+    if(!data) throw new Error(lastErr || 'Alle endpoints fejlede');
     const attachList = data.value || [];
 
-    // Now fetch each attachment individually to get contentBytes
+    // Fetch each attachment individually to get contentBytes (for images/downloads)
     const attachments = [];
     for(const att of attachList) {
+      if(att.contentBytes) {
+        // Already have content (small attachments)
+        attachments.push({ id: att.id, name: att.name, size: att.size, contentType: att.contentType || 'application/octet-stream', contentBytes: att.contentBytes });
+        continue;
+      }
       try {
-        const aResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments/' + att.id + '?$select=id,name,size,contentType,contentBytes', {
+        const aResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments/' + att.id, {
           headers: { Authorization: 'Bearer ' + token }
         });
         if(aResp.ok) {
           const aData = await aResp.json();
           attachments.push({
-            id: aData.id,
-            name: aData.name || att.name,
-            size: aData.size || att.size,
+            id: aData.id, name: aData.name || att.name, size: aData.size || att.size,
             contentType: aData.contentType || att.contentType || 'application/octet-stream',
             contentBytes: aData.contentBytes || null
           });
         } else {
-          // Fallback: add without contentBytes
           attachments.push({ id: att.id, name: att.name, size: att.size, contentType: att.contentType || 'application/octet-stream', contentBytes: null });
         }
       } catch(ae) {
@@ -779,7 +796,7 @@ async function fetchAttachments(jobId) {
   } catch(e) {
     console.warn('Attachments fetch failed:', e);
     const card2 = document.getElementById('attach-card-' + jobId);
-    if(card2) card2.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--red)">Kunne ikke hente filer: '+e.message+'</div>';
+    if(card2) card2.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--red)">Kunne ikke hente filer</div><div style="font-size:12px;color:var(--text3);margin-top:4px;word-break:break-all">'+e.message+'</div>';
   }
 }
 
