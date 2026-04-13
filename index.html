@@ -496,6 +496,21 @@ async function msLogin() {
   }
 }
 
+// Helper: always get a fresh token before API calls
+async function getToken() {
+  if(!msalApp || !msalReady) return accessToken;
+  const accounts = msalApp.getAllAccounts();
+  if(!accounts.length) return accessToken;
+  try {
+    const resp = await msalApp.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
+    accessToken = resp.accessToken;
+    return accessToken;
+  } catch(e) {
+    console.warn('Token refresh failed, using existing:', e);
+    return accessToken;
+  }
+}
+
 async function silentLogin(account) {
   try {
     const resp = await msalApp.acquireTokenSilent({ scopes: SCOPES, account });
@@ -631,7 +646,7 @@ async function syncOutlook() {
         rawDate: startDt,
         tech: existing ? existing.tech : guessAssigneeFromBody(ev.body?.content||'') || guessAssignee(ev.attendees),
         desc: stripHtml(ev.body?.content || ''),
-        materials: [],
+        materials: existing ? existing.materials : loadMaterialsFromStorage(ev.id),
         status: existing ? existing.status : categoryToStatus(ev.categories),
         photos: existing ? existing.photos : [],
         hasAttachments: ev.hasAttachments,
@@ -705,30 +720,60 @@ function stripHtml(html) {
 
 async function fetchAttachments(jobId) {
   const j = jobs.find(x => x.id === jobId || x.outlookId === jobId);
-  if(!j || !j.outlookId || !accessToken) {
+  if(!j || !j.outlookId) {
     const card = document.getElementById('attach-card-' + jobId);
-    if(card) {
-      if(!accessToken) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Log ind med Microsoft for at se filer</div>';
-      else if(!j || !j.outlookId) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Ingen Outlook-begivenhed tilknyttet</div>';
-    }
+    if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Ingen Outlook-begivenhed tilknyttet</div>';
     return;
   }
-  // Show loading state in attach card
+  // Refresh token before API call
+  const token = await getToken();
+  if(!token) {
+    const card = document.getElementById('attach-card-' + jobId);
+    if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Log ind med Microsoft for at se filer</div>';
+    return;
+  }
+  // Show loading state
   const card = document.getElementById('attach-card-' + jobId);
   if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Henter filer fra Outlook...</div>';
   try {
-    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments?$select=id,name,size,contentType,contentBytes', {
-      headers: { Authorization: 'Bearer ' + accessToken }
+    // First get attachment list (without contentBytes for reliability)
+    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments', {
+      headers: { Authorization: 'Bearer ' + token }
     });
-    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+    if(!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      console.warn('Attachments response:', resp.status, errText);
+      throw new Error('HTTP ' + resp.status);
+    }
     const data = await resp.json();
-    j.attachments = (data.value || []).map(a => ({
-      id: a.id,
-      name: a.name,
-      size: a.size,
-      contentType: a.contentType || 'application/octet-stream',
-      contentBytes: a.contentBytes || null
-    }));
+    const attachList = data.value || [];
+
+    // Now fetch each attachment individually to get contentBytes
+    const attachments = [];
+    for(const att of attachList) {
+      try {
+        const aResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments/' + encodeURIComponent(att.id) + '?$select=id,name,size,contentType,contentBytes', {
+          headers: { Authorization: 'Bearer ' + token }
+        });
+        if(aResp.ok) {
+          const aData = await aResp.json();
+          attachments.push({
+            id: aData.id,
+            name: aData.name || att.name,
+            size: aData.size || att.size,
+            contentType: aData.contentType || att.contentType || 'application/octet-stream',
+            contentBytes: aData.contentBytes || null
+          });
+        } else {
+          // Fallback: add without contentBytes
+          attachments.push({ id: att.id, name: att.name, size: att.size, contentType: att.contentType || 'application/octet-stream', contentBytes: null });
+        }
+      } catch(ae) {
+        attachments.push({ id: att.id, name: att.name, size: att.size, contentType: att.contentType || 'application/octet-stream', contentBytes: null });
+      }
+    }
+
+    j.attachments = attachments;
     j.attachmentsLoaded = true;
     renderAttachCard(jobId);
   } catch(e) {
@@ -815,10 +860,12 @@ function openImageFull(src) {
 
 async function uploadFiles(jobId, input) {
   const j = jobs.find(x => x.id == jobId || x.outlookId == jobId);
-  if(!j || !j.outlookId || !accessToken) {
-    showToast('Ingen Outlook forbindelse — kan ikke uploade');
+  if(!j || !j.outlookId) {
+    showToast('Ingen Outlook-begivenhed tilknyttet');
     return;
   }
+  const token = await getToken();
+  if(!token) { showToast('Log ind med Microsoft først'); return; }
   const files = Array.from(input.files);
   if(!files.length) return;
   showToast('Uploader ' + files.length + ' fil(er) til Outlook...');
@@ -832,9 +879,9 @@ async function uploadFiles(jobId, input) {
         contentType: file.type || 'application/octet-stream',
         contentBytes: bytes
       };
-      const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments', {
+      const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments', {
         method: 'POST',
-        headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
       if(resp.ok) {
@@ -863,29 +910,32 @@ function fileToBase64(file) {
 }
 
 async function updateOutlookEvent(job, newStatus) {
-  if(!accessToken || !job.outlookId) return;
+  if(!job.outlookId) return;
+  const token = await getToken();
+  if(!token) return;
   try {
     const statusObj = getStatus(newStatus);
     const patch = { body: { contentType: 'text', content: '[Status: ' + newStatus + ']\n\n' + (job.desc||'') } };
     if(statusObj.outlookCat) patch.categories = [statusObj.outlookCat];
     console.log('Updating event category to:', statusObj.outlookCat);
-    await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + job.outlookId, {
+    await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(job.outlookId), {
       method: 'PATCH',
-      headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify(patch)
     });
   } catch(e) { console.warn('Outlook update failed:', e); }
 }
 
 async function createOutlookEvent(job) {
-  if(!accessToken) return null;
+  const token = await getToken();
+  if(!token) return null;
   try {
     const startDt = new Date(job.rawDate || new Date());
     const endDt = new Date(startDt); endDt.setHours(endDt.getHours() + 1);
     const subject = job.sagsnr ? `${job.customer} - ${job.sagsnr}` : job.customer;
     const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         subject,
         body: { contentType: 'text', content: job.desc || '' },
@@ -1499,44 +1549,47 @@ function buildVareskemaHtml(jobId) {
 async function uploadVareskema(jobId) {
   const j = jobs.find(x => (x.id || x.outlookId) == jobId);
   if(!j) { showToast('Job ikke fundet'); return; }
-  if(!accessToken) { showToast('Log ind med Microsoft først'); return; }
   if(!j.outlookId) { showToast('Ingen Outlook-begivenhed tilknyttet denne sag'); return; }
   if(!j.materials || !j.materials.length) {
     showToast('Tilføj arbejde først');
     return;
   }
-  
+
+  // Refresh token
+  const token = await getToken();
+  if(!token) { showToast('Log ind med Microsoft først'); return; }
+
   const htmlContent = buildVareskemaHtml(jobId);
   if(!htmlContent) return;
-  
+
   showToast('Uploader vareskema til Outlook...');
-  
+
   try {
     // Upload as HTML file attachment
     const base64 = btoa(unescape(encodeURIComponent(htmlContent)));
-    const body = {
+    const attachBody = {
       '@odata.type': '#microsoft.graph.fileAttachment',
       name: 'Vareskema_' + (j.sagsnr || j.customer).replace(/[^a-zA-Z0-9æøåÆØÅ]/g,'_') + '.html',
       contentType: 'text/html',
       contentBytes: base64
     };
-    
-    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments', {
+
+    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(attachBody)
     });
-    
+
     if(resp.ok) {
       showToast('Vareskema uploadet til Outlook ✓');
       // Also update the event body with the vareskema table
       await updateEventBodyWithVareskema(jobId);
       // Refresh attachments
-      fetchAttachments(jobId);
+      await fetchAttachments(jobId);
     } else {
       const err = await resp.text();
-      console.warn('Vareskema upload failed:', err);
-      showToast('Kunne ikke uploade vareskema');
+      console.warn('Vareskema upload failed:', resp.status, err);
+      showToast('Kunne ikke uploade vareskema: ' + resp.status);
     }
   } catch(e) {
     console.warn('Vareskema error:', e);
@@ -1546,7 +1599,9 @@ async function uploadVareskema(jobId) {
 
 async function updateEventBodyWithVareskema(jobId) {
   const j = jobs.find(x => (x.id || x.outlookId) == jobId);
-  if(!j || !j.outlookId || !accessToken) return;
+  if(!j || !j.outlookId) return;
+  const token = await getToken();
+  if(!token) return;
   
   // Build a table for the event body
   let tableHtml = '<br><hr><h3>Udført arbejde</h3>';
@@ -1561,12 +1616,12 @@ async function updateEventBodyWithVareskema(jobId) {
   
   try {
     // First get current body
-    const getResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '?$select=body', {
-      headers: { Authorization: 'Bearer ' + accessToken }
+    const getResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '?$select=body', {
+      headers: { Authorization: 'Bearer ' + token }
     });
-    if(!getResp.ok) return;
+    if(!getResp.ok) { console.warn('Get event body failed:', getResp.status); return; }
     const eventData = await getResp.json();
-    
+
     // Remove old vareskema section if present, then append new
     let currentBody = (eventData.body && eventData.body.content) || '';
     // Remove old "Udført arbejde" section
@@ -1580,13 +1635,13 @@ async function updateEventBodyWithVareskema(jobId) {
     }
     // Remove trailing </body></html> if present
     currentBody = currentBody.replace('</body>', '').replace('</html>', '');
-    
+
     const newBody = currentBody + tableHtml;
-    
+
     // Update event body
-    const patchResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId, {
+    const patchResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId), {
       method: 'PATCH',
-      headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         body: { contentType: 'html', content: newBody }
       })
@@ -1646,6 +1701,26 @@ let ecoProductsLoaded = true;
 let ecoProducts = PRODUCTS;
 let ecoError = '';
 
+// ── Materials localStorage persistence ──
+function saveMaterialsToStorage(jobId, materials) {
+  try {
+    const key = 'spraytek_mat_' + jobId;
+    if(materials && materials.length > 0) {
+      localStorage.setItem(key, JSON.stringify(materials));
+    } else {
+      localStorage.removeItem(key);
+    }
+  } catch(e) { console.warn('localStorage save failed:', e); }
+}
+
+function loadMaterialsFromStorage(jobId) {
+  try {
+    const key = 'spraytek_mat_' + jobId;
+    const data = localStorage.getItem(key);
+    return data ? JSON.parse(data) : [];
+  } catch(e) { return []; }
+}
+
 function getJobMaterials(jobId) {
   const j = jobs.find(x => (x.id || x.outlookId) == jobId);
   return (j && j.materials) || [];
@@ -1665,10 +1740,11 @@ function setJobMaterial(jobId, productNr, qty) {
     j.materials.push({
       nr: productNr,
       name: prod ? prod.name : productNr,
-      
       qty: qty
     });
   }
+  // Persist to localStorage
+  saveMaterialsToStorage(j.outlookId || j.id, j.materials);
   renderMaterialsList(jobId);
 }
 
