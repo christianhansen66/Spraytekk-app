@@ -429,7 +429,7 @@
 const CLIENT_ID = 'e482c648-5353-4307-9a6a-b837e3fa3cd9';
 const TENANT_ID = 'ce7878c1-2a83-4397-b5e9-a0076c28703e';
 const AUTHORITY = 'https://login.microsoftonline.com/' + TENANT_ID;
-const SCOPES = ['Calendars.ReadWrite', 'Calendars.ReadWrite.Shared', 'User.Read', 'Mail.ReadBasic'];
+const SCOPES = ['Calendars.ReadWrite', 'User.Read'];
 const TECH_COLORS = { Christian:'#1B5EAB', Jesper:'#2A7A3B', Frederik:'#C05A00', Admin:'#1A1816' };
 
 let msalApp = null;
@@ -725,77 +725,48 @@ async function fetchAttachments(jobId) {
     if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Ingen Outlook-begivenhed tilknyttet</div>';
     return;
   }
-  // Refresh token before API call
   const token = await getToken();
   if(!token) {
     const card = document.getElementById('attach-card-' + jobId);
     if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Log ind med Microsoft for at se filer</div>';
     return;
   }
-  // Show loading state
   const card = document.getElementById('attach-card-' + jobId);
   if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Henter filer fra Outlook...</div>';
+
+  // Build the URL — use exact same base as sync (which works)
+  const url = 'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments';
+  console.log('[ATTACH] URL:', url);
+  console.log('[ATTACH] outlookId:', j.outlookId);
+  console.log('[ATTACH] token length:', token ? token.length : 'null');
+
   try {
-    // Use $expand=attachments on the event itself — most reliable for shared mailbox
-    const expandUrl = 'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '?$expand=attachments';
-    console.log('Fetching attachments via $expand for event:', j.outlookId);
-    const resp = await fetch(expandUrl, {
-      headers: { Authorization: 'Bearer ' + token }
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + token }
     });
+    console.log('[ATTACH] Response status:', resp.status);
 
     if(!resp.ok) {
-      const errBody = await resp.text().catch(() => '');
-      console.warn('$expand attachments failed:', resp.status, errBody);
-      // Fallback: try direct attachments endpoint
-      const directUrl = 'https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments';
-      console.log('Trying direct endpoint:', directUrl);
-      const resp2 = await fetch(directUrl, { headers: { Authorization: 'Bearer ' + token } });
-      if(!resp2.ok) {
-        const errBody2 = await resp2.text().catch(() => '');
-        console.warn('Direct attachments also failed:', resp2.status, errBody2);
-        // Last resort: try beta API
-        const betaUrl = 'https://graph.microsoft.com/beta/users/info@spraytek.dk/events/' + j.outlookId + '/attachments';
-        const resp3 = await fetch(betaUrl, { headers: { Authorization: 'Bearer ' + token } });
-        if(!resp3.ok) {
-          const errBody3 = await resp3.text().catch(() => '');
-          console.warn('Beta attachments also failed:', resp3.status, errBody3);
-          throw new Error('Event ID: ' + j.outlookId.substring(0,20) + '... Status: ' + resp.status + ' / ' + resp2.status + ' / ' + resp3.status);
-        }
-        const betaData = await resp3.json();
-        j.attachments = (betaData.value || []).map(a => ({
-          id: a.id, name: a.name, size: a.size,
-          contentType: a.contentType || 'application/octet-stream',
-          contentBytes: a.contentBytes || null
-        }));
-        j.attachmentsLoaded = true;
-        renderAttachCard(jobId);
-        return;
-      }
-      const directData = await resp2.json();
-      j.attachments = (directData.value || []).map(a => ({
-        id: a.id, name: a.name, size: a.size,
-        contentType: a.contentType || 'application/octet-stream',
-        contentBytes: a.contentBytes || null
-      }));
-      j.attachmentsLoaded = true;
-      renderAttachCard(jobId);
-      return;
+      const errBody = await resp.text().catch(function() { return ''; });
+      console.error('[ATTACH] Error body:', errBody);
+      // Parse error for display
+      let errMsg = '';
+      try { const parsed = JSON.parse(errBody); errMsg = parsed.error ? (parsed.error.code + ': ' + parsed.error.message) : errBody; } catch(pe) { errMsg = errBody; }
+      throw new Error('Status ' + resp.status + ' — ' + errMsg);
     }
 
-    const eventData = await resp.json();
-    const attachList = eventData.attachments || [];
-
-    j.attachments = attachList.map(a => ({
-      id: a.id, name: a.name, size: a.size,
-      contentType: a.contentType || 'application/octet-stream',
-      contentBytes: a.contentBytes || null
-    }));
+    const data = await resp.json();
+    console.log('[ATTACH] Got', (data.value || []).length, 'attachments');
+    j.attachments = (data.value || []).map(function(a) {
+      return { id: a.id, name: a.name, size: a.size, contentType: a.contentType || 'application/octet-stream', contentBytes: a.contentBytes || null };
+    });
     j.attachmentsLoaded = true;
     renderAttachCard(jobId);
   } catch(e) {
-    console.warn('Attachments fetch failed:', e);
+    console.error('[ATTACH] Failed:', e);
     const card2 = document.getElementById('attach-card-' + jobId);
-    if(card2) card2.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--red)">Kunne ikke hente filer</div><div style="font-size:12px;color:var(--text3);margin-top:4px;word-break:break-all">'+e.message+'</div>';
+    if(card2) card2.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--red);word-break:break-all">' + e.message + '</div>';
   }
 }
 
@@ -1223,12 +1194,12 @@ async function updateStatus(id, status) {
   const j = jobs.find(x=>x.id==id||x.outlookId==id);
   if(!j) return;
   j.status = status;
-  showToast(status==='Done'?'Markeret færdigt ✓':'Status: I gang');
-  if(j.outlookId && accessToken) {
-    updateOutlookEvent(j, status);
-  }
+  const statusObj = getStatus(status);
+  showToast('Status: ' + (statusObj ? statusObj.label : status));
   openDetail(id);
   renderJobs();
+  // Sync everything to Outlook
+  if(j.outlookId) syncJobToOutlook(j.id || j.outlookId);
 }
 
 function assignMe(id) {
@@ -1244,17 +1215,8 @@ async function assignTech(id, name) {
   showToast(name ? 'Tildelt til '+name : 'Tildeling fjernet');
   openDetail(id);
   renderJobs();
-  // Update Outlook event body with assignment info
-  if(j.outlookId && accessToken && name) {
-    try {
-      const patch = { body: { contentType: 'text', content: '[Tildelt: '+name+']\n[Status: '+j.status+']\n\n'+(j.desc||'') } };
-      await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/'+j.outlookId, {
-        method: 'PATCH',
-        headers: { Authorization: 'Bearer '+accessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch)
-      });
-    } catch(e) { console.warn('Could not update Outlook event:', e); }
-  }
+  // Sync everything to Outlook
+  if(j.outlookId) syncJobToOutlook(j.id || j.outlookId);
 }
 
 function addPhotos(id, input) {
@@ -1520,7 +1482,9 @@ async function updateJobKm(jobId) {
   }
   
   j.km = totalKm;
-  
+  // Auto-sync km to Outlook
+  if(j.outlookId) syncJobToOutlook(j.id || j.outlookId);
+
   if(kmEl) {
     kmEl.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center">' +
       '<div><span style="font-size:22px;font-weight:700;color:var(--text)">' + totalKm + '</span> <span style="font-size:14px;color:var(--text2)">km tur/retur</span></div>' +
@@ -1613,63 +1577,96 @@ async function uploadVareskema(jobId) {
   }
 }
 
-async function updateEventBodyWithVareskema(jobId) {
+// ── UNIFIED SYNC: pushes ALL job data to Outlook event body ──
+async function syncJobToOutlook(jobId) {
   const j = jobs.find(x => (x.id || x.outlookId) == jobId);
   if(!j || !j.outlookId) return;
   const token = await getToken();
   if(!token) return;
-  
-  // Build a table for the event body
-  let tableHtml = '<br><hr><h3>Udført arbejde</h3>';
-  tableHtml += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;">';
-  tableHtml += '<tr style="background:#F3F3F1;"><th>Varenr.</th><th>Beskrivelse</th><th>Antal</th></tr>';
-  j.materials.forEach(function(m) {
-    tableHtml += '<tr><td>' + m.nr + '</td><td>' + m.name + '</td><td style="text-align:right;font-weight:bold;">' + m.qty + '</td></tr>';
-  });
-  tableHtml += '</table>';
-  if(j.km) tableHtml += '<p>Kørsel: ' + j.km + ' km tur/retur</p>';
-  tableHtml += '<p><em>Opdateret: ' + new Date().toLocaleString('da-DK') + '</em></p>';
-  
-  try {
-    // First get current body
-    const getResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '?$select=body', {
-      headers: { Authorization: 'Bearer ' + token }
+
+  // Build complete job info table
+  const statusObj = getStatus(j.status);
+  let html = '<br><hr>';
+  html += '<h3 style="margin:0 0 10px 0;font-family:Arial,sans-serif;">Spraytek — Jobskema</h3>';
+  html += '<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;width:100%;max-width:600px;">';
+
+  // Status
+  html += '<tr style="background:#F3F3F1;"><td style="font-weight:bold;width:140px;">Status</td><td>' + (statusObj ? statusObj.label : j.status) + '</td></tr>';
+
+  // Tildelt
+  html += '<tr><td style="font-weight:bold;">Tildelt til</td><td>' + (j.tech || 'Ikke tildelt') + '</td></tr>';
+
+  // Kørsel
+  if(j.km) {
+    html += '<tr><td style="font-weight:bold;">Kørsel</td><td>' + j.km + ' km tur/retur (fra Fredericia)</td></tr>';
+  }
+
+  html += '</table>';
+
+  // Udført arbejde tabel
+  if(j.materials && j.materials.length > 0) {
+    html += '<h4 style="margin:16px 0 6px 0;font-family:Arial,sans-serif;">Udført arbejde</h4>';
+    html += '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;width:100%;max-width:600px;">';
+    html += '<tr style="background:#F3F3F1;"><th style="text-align:left;">Varenr.</th><th style="text-align:left;">Beskrivelse</th><th style="text-align:right;">Antal</th></tr>';
+    j.materials.forEach(function(m) {
+      html += '<tr><td>' + m.nr + '</td><td>' + m.name + '</td><td style="text-align:right;font-weight:bold;">' + m.qty + '</td></tr>';
     });
-    if(!getResp.ok) { console.warn('Get event body failed:', getResp.status); return; }
+    html += '</table>';
+  }
+
+  html += '<p style="font-size:12px;color:#888;font-family:Arial,sans-serif;"><em>Sidst opdateret: ' + new Date().toLocaleString('da-DK') + '</em></p>';
+
+  try {
+    // Get current event body
+    const getResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '?$select=body', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if(!getResp.ok) { console.warn('[SYNC] Get event body failed:', getResp.status); return; }
     const eventData = await getResp.json();
 
-    // Remove old vareskema section if present, then append new
+    // Remove old Spraytek section if present
     let currentBody = (eventData.body && eventData.body.content) || '';
-    // Remove old "Udført arbejde" section
-    const marker = '<h3>Udført arbejde</h3>';
-    const idx = currentBody.indexOf(marker);
-    if(idx > -1) {
-      // Find the <hr> before it
-      const hrIdx = currentBody.lastIndexOf('<hr>', idx);
-      if(hrIdx > -1) currentBody = currentBody.substring(0, hrIdx);
-      else currentBody = currentBody.substring(0, idx);
+    const marker = 'Spraytek';
+    const h3Marker = currentBody.indexOf('<h3');
+    if(h3Marker > -1 && currentBody.indexOf(marker, h3Marker) < h3Marker + 80 && currentBody.indexOf(marker, h3Marker) > -1) {
+      const hrBefore = currentBody.lastIndexOf('<hr>', h3Marker);
+      const brBefore = currentBody.lastIndexOf('<br>', h3Marker);
+      const cutPoint = Math.max(hrBefore, brBefore, 0);
+      if(cutPoint > 0) currentBody = currentBody.substring(0, cutPoint);
     }
-    // Remove trailing </body></html> if present
-    currentBody = currentBody.replace('</body>', '').replace('</html>', '');
+    // Also remove legacy "Udført arbejde" section
+    const legacyMarker = '<h3>Udført arbejde</h3>';
+    const legacyIdx = currentBody.indexOf(legacyMarker);
+    if(legacyIdx > -1) {
+      const hrIdx = currentBody.lastIndexOf('<hr>', legacyIdx);
+      if(hrIdx > -1) currentBody = currentBody.substring(0, hrIdx);
+      else currentBody = currentBody.substring(0, legacyIdx);
+    }
+    // Clean trailing tags
+    currentBody = currentBody.replace(/<\/body>/gi, '').replace(/<\/html>/gi, '');
 
-    const newBody = currentBody + tableHtml;
+    // PATCH event with category + body
+    const statusCat = statusObj && statusObj.outlookCat ? [statusObj.outlookCat] : undefined;
+    const patchBody = { body: { contentType: 'html', content: currentBody + html } };
+    if(statusCat) patchBody.categories = statusCat;
 
-    // Update event body
     const patchResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId, {
       method: 'PATCH',
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        body: { contentType: 'html', content: newBody }
-      })
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(patchBody)
     });
-    
     if(patchResp.ok) {
-      console.log('Event body updated with vareskema');
+      console.log('[SYNC] Event updated with full job data');
+    } else {
+      console.warn('[SYNC] PATCH failed:', patchResp.status);
     }
   } catch(e) {
-    console.warn('Failed to update event body:', e);
+    console.warn('[SYNC] Failed to sync job to Outlook:', e);
   }
 }
+
+// Keep legacy name as alias
+async function updateEventBodyWithVareskema(jobId) { return syncJobToOutlook(jobId); }
 
 // ── VARELISTE (fra e-conomic) ──
 const PRODUCTS = [
@@ -1762,6 +1759,11 @@ function setJobMaterial(jobId, productNr, qty) {
   // Persist to localStorage
   saveMaterialsToStorage(j.outlookId || j.id, j.materials);
   renderMaterialsList(jobId);
+  // Auto-sync to Outlook (debounced)
+  if(j.outlookId) {
+    clearTimeout(j._syncTimer);
+    j._syncTimer = setTimeout(function() { syncJobToOutlook(j.id || j.outlookId); }, 1500);
+  }
 }
 
 function renderMaterialsCard(jobId) {
