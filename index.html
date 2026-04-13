@@ -737,7 +737,7 @@ async function fetchAttachments(jobId) {
   if(card) card.innerHTML = '<div class="detail-section-title">Vedhæftede filer</div><div style="font-size:14px;color:var(--text2);padding:10px 0">Henter filer fra Outlook...</div>';
   try {
     // First get attachment list (without contentBytes for reliability)
-    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments', {
+    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments', {
       headers: { Authorization: 'Bearer ' + token }
     });
     if(!resp.ok) {
@@ -752,7 +752,7 @@ async function fetchAttachments(jobId) {
     const attachments = [];
     for(const att of attachList) {
       try {
-        const aResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments/' + encodeURIComponent(att.id) + '?$select=id,name,size,contentType,contentBytes', {
+        const aResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments/' + att.id + '?$select=id,name,size,contentType,contentBytes', {
           headers: { Authorization: 'Bearer ' + token }
         });
         if(aResp.ok) {
@@ -879,7 +879,7 @@ async function uploadFiles(jobId, input) {
         contentType: file.type || 'application/octet-stream',
         contentBytes: bytes
       };
-      const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments', {
+      const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments', {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -918,7 +918,7 @@ async function updateOutlookEvent(job, newStatus) {
     const patch = { body: { contentType: 'text', content: '[Status: ' + newStatus + ']\n\n' + (job.desc||'') } };
     if(statusObj.outlookCat) patch.categories = [statusObj.outlookCat];
     console.log('Updating event category to:', statusObj.outlookCat);
-    await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(job.outlookId), {
+    await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + job.outlookId, {
       method: 'PATCH',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify(patch)
@@ -1574,7 +1574,7 @@ async function uploadVareskema(jobId) {
       contentBytes: base64
     };
 
-    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '/attachments', {
+    const resp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '/attachments', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify(attachBody)
@@ -1616,7 +1616,7 @@ async function updateEventBodyWithVareskema(jobId) {
   
   try {
     // First get current body
-    const getResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId) + '?$select=body', {
+    const getResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId + '?$select=body', {
       headers: { Authorization: 'Bearer ' + token }
     });
     if(!getResp.ok) { console.warn('Get event body failed:', getResp.status); return; }
@@ -1639,7 +1639,7 @@ async function updateEventBodyWithVareskema(jobId) {
     const newBody = currentBody + tableHtml;
 
     // Update event body
-    const patchResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + encodeURIComponent(j.outlookId), {
+    const patchResp = await fetch('https://graph.microsoft.com/v1.0/users/info@spraytek.dk/events/' + j.outlookId, {
       method: 'PATCH',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({
