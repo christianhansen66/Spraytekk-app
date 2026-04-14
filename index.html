@@ -1171,7 +1171,12 @@ function openDetail(id) {
       ${j.sagsnr?`<div class="detail-row"><div class="dr-label">Sagsnr.</div><div class="dr-val">${j.sagsnr}</div></div>`:''}
       <div class="detail-row"><div class="dr-label">Dato & tid</div><div class="dr-val">${j.date} kl. ${j.time}</div></div>
       <div class="detail-row"><div class="dr-label">Tildelt til</div><div class="dr-val">${j.tech||'<span style="color:var(--red)">Ikke tildelt</span>'}</div></div>
-      ${j.desc?`<div class="detail-row"><div class="dr-label">Beskrivelse</div><div class="dr-val">${j.desc}</div></div>`:''}
+      <div class="detail-row" style="flex-direction:column;gap:6px">
+        <div class="dr-label">Beskrivelse</div>
+        <textarea id="desc-edit-${jid}" oninput="updateDesc('${jid}',this.value)"
+          style="width:100%;min-height:80px;padding:12px;border:1.5px solid var(--border2);border-radius:var(--radius-sm);font-size:15px;font-family:'DM Sans',sans-serif;color:var(--text);background:var(--surface);resize:vertical;line-height:1.5"
+          placeholder="Tilføj beskrivelse...">${j.desc||''}</textarea>
+      </div>
       ${j.webLink?`<div class="detail-row" style="border-bottom:none"><div class="dr-label">Outlook</div><div class="dr-val"><a href="${j.webLink}" target="_blank" style="color:var(--blue);font-size:14px">Åbn i Outlook →</a></div></div>`:''}
     </div>
     <div class="detail-card">
@@ -1223,6 +1228,17 @@ function openDetail(id) {
 }
 
 function closeDetail(){document.getElementById('detail-screen').style.display='none';document.getElementById('app').style.display='flex';renderJobs();}
+
+function updateDesc(id, text) {
+  const j = jobs.find(x=>x.id==id||x.outlookId==id);
+  if(!j) return;
+  j.desc = text;
+  // Debounced sync to Outlook
+  if(j.outlookId) {
+    clearTimeout(j._descSyncTimer);
+    j._descSyncTimer = setTimeout(function() { syncJobToOutlook(j.id || j.outlookId); }, 2000);
+  }
+}
 
 async function updateStatus(id, status) {
   const j = jobs.find(x=>x.id==id||x.outlookId==id);
@@ -1629,6 +1645,11 @@ async function syncJobToOutlook(jobId) {
 
   // Tildelt
   html += '<tr><td style="font-weight:bold;">Tildelt til</td><td>' + (j.tech || 'Ikke tildelt') + '</td></tr>';
+
+  // Beskrivelse
+  if(j.desc) {
+    html += '<tr><td style="font-weight:bold;">Beskrivelse</td><td>' + j.desc.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>') + '</td></tr>';
+  }
 
   // Kørsel
   if(j.km) {
